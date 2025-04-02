@@ -10,12 +10,19 @@ import numpy as np
 from scanpy import logging
 
 from scirpy.io._datastructures import AirrCell
-from scirpy.util import DataHandler
+from scirpy.util import DataHandler, SCIRPY_DUAL_IR_MODEL, SCIRPY_MODELS
 
-SCIRPY_DUAL_IR_MODEL = "scirpy_dual_ir_v0.13"
 # make these constants available to numba
 _VJ_LOCI = tuple(AirrCell.VJ_LOCI)
 _VDJ_LOCI = tuple(AirrCell.VDJ_LOCI)
+
+
+def _get_scirpy_model(model: str) -> str:
+    if model in SCIRPY_MODELS.values():
+        return model
+    if model not in SCIRPY_MODELS:
+        raise ValueError(f"Invalid model '{model}'. Valid models are {list(SCIRPY_MODELS.keys())}")
+    return SCIRPY_MODELS[model]
 
 
 @DataHandler.inject_param_docs()
@@ -34,6 +41,7 @@ def index_chains(
     airr_mod: str = "airr",
     airr_key: str = "airr",
     key_added: str = "chain_indices",
+    model: str = SCIRPY_DUAL_IR_MODEL,
 ) -> None:
     """\
     Selects primary/secondary VJ/VDJ chains per cell according to the :ref:`receptor-model`.
@@ -73,12 +81,14 @@ def index_chains(
     {airr_key}
     key_added
         Key under which the chain indicies will be stored in `adata.obsm` and metadata will be stored in `adata.uns`.
+    {model}
 
     Returns
     -------
     Nothing, but adds a dataframe to `adata.obsm[chain_indices]`
     """
     params = DataHandler(adata, airr_mod, airr_key)
+    model = _get_scirpy_model(model)
 
     # prepare filter functions
     if isinstance(filter, Callable):
@@ -130,9 +140,15 @@ def index_chains(
                 idx = idx[tmp_idx]
             else:
                 logging.debug(f"Skip sorting by {k} because field not present")
-
-        # We want the result to be lists of exactly 2 - clip if longer, pad with None if shorter.
-        res[chain_type] = ak.pad_none(idx, 2, axis=1, clip=True)
+        # For dual scirpy we want the result to be lists of exactly 2 - clip if longer, pad with None if shorter.
+        if model == SCIRPY_DUAL_IR_MODEL:
+            res[chain_type] = ak.pad_none(idx, 2, axis=1, clip=True)
+        else:
+            # For multi scirpy we dont want to clip and to be compatible with the format of the dual model, pad None
+            # arrays are the same size. Otherwise the indexing implementations would be different downstream.
+            idx_max = np.max(ak.num(idx)) + 1
+            res[chain_type] = ak.pad_none(idx, idx_max, axis=1)
+        #
         is_multichain |= ak.to_numpy(_awkward_len(idx)) > 2
 
     # build results
@@ -143,7 +159,8 @@ def index_chains(
 
     # store metadata in .uns
     params.adata.uns[key_added] = {
-        "model": SCIRPY_DUAL_IR_MODEL,  # can be used to distinguish different receptor models that may be added in the future.
+        # can be used to distinguish different receptor models that may be added in the future.
+        "model": model,
         "filter": str(filter),
         "airr_key": airr_key,
         "sort_chains_by": str(sort_chains_by),

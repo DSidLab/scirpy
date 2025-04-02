@@ -4,6 +4,7 @@ import random
 from collections.abc import Sequence
 from typing import Literal, cast
 
+import awkward as ak
 import igraph as ig
 import numpy as np
 import pandas as pd
@@ -14,7 +15,7 @@ from scanpy import logging
 from scirpy.ir_dist import MetricType, _get_metric_key
 from scirpy.ir_dist._clonotype_neighbors import ClonotypeNeighbors
 from scirpy.pp import ir_dist
-from scirpy.util import DataHandler, read_cell_indices
+from scirpy.util import DataHandler, SCIRPY_DUAL_IR_MODEL, read_cell_indices
 from scirpy.util.graph import igraph_from_sparse_matrix, layout_components
 
 _common_doc = """\
@@ -158,13 +159,20 @@ def _validate_parameters(
         if isinstance(within_group, str):
             within_group = [within_group]
         for group_col in within_group:
-            try:
-                params.get_obs(group_col)
-            except KeyError:
-                msg = f"column `{group_col}` not found in `obs`. "
-                if group_col in ("receptor_type", "receptor_subtype"):
-                    msg += "Did you run `tl.chain_qc`? "
-                raise ValueError(msg) from None
+            if params.model == SCIRPY_DUAL_IR_MODEL:
+                try:
+                    params.get_obs(group_col)
+                except KeyError:
+                    msg = f"column `{group_col}` not found in `obs`. "
+                    if group_col in ("receptor_type", "receptor_subtype"):
+                        msg += "Did you run `tl.chain_qc`? "
+                    raise ValueError(msg) from None
+            else:
+                if group_col not in ak.fields(params.airr):
+                    raise ValueError(
+                        f"column `{group_col}` not found in `airr`. "
+                        "for multi chain model group columns must be in `airr` fields."
+                    )
 
     if distance_key is None:
         if reference is not None:
@@ -322,25 +330,95 @@ def define_clonotype_clusters(
     clonotype_cluster_series = pd.Series(data=None, index=params.adata.obs_names, dtype=str)
     clonotype_cluster_size_series = pd.Series(data=None, index=params.adata.obs_names, dtype=int)
 
-    # clonotype cluster = graph partition
-    idx, values = zip(
-        *itertools.chain.from_iterable(
-            zip(ctn.cell_indices[str(ct_id)], itertools.repeat(str(clonotype_cluster)))
-            for ct_id, clonotype_cluster in enumerate(part.membership)
-        ),
-        strict=False,
-    )
-    clonotype_cluster_series = pd.Series(values, index=idx).reindex(params.adata.obs_names)
-    clonotype_cluster_size_series = clonotype_cluster_series.groupby(clonotype_cluster_series).transform("count")
-
-    # Return or store results
+    #
     clonotype_distance_res = {
         "distances": clonotype_dist,
         "cell_indices": json.dumps(ctn.cell_indices),
     }
+    #
+    if params.model == SCIRPY_DUAL_IR_MODEL:
+        # unpack clonotype cluster cell indices for graph partitions (clonotype clusters)
+        idx, values = zip(
+            *itertools.chain.from_iterable(
+                zip(ctn.cell_indices[str(ct_id)], itertools.repeat(str(clonotype_cluster)))
+                for ct_id, clonotype_cluster in enumerate(part.membership)
+            ),
+            strict=False,
+        )
+        clonotype_cluster_series = pd.Series(values, index=idx).reindex(params.adata.obs_names)
+        clonotype_cluster_size_series = clonotype_cluster_series.groupby(clonotype_cluster_series).transform("count")
+    else:
+        # unpack clonotype cluster cell indices and clone umis for graph partitions (clonotype clusters)
+        idx, values, clone_chain_indices = zip(
+            *itertools.chain.from_iterable(
+                zip(
+                    ctn.cell_indices[str(ct_id)],
+                    itertools.repeat(str(clonotype_cluster)),
+                    ctn.clone_chain_data["chain_index"][str(ct_id)],
+                )
+                for ct_id, clonotype_cluster in enumerate(part.membership)
+            ),
+            strict=False,
+        )
+        # in series add an awkward array for clone ids for each chain
+        clone_ids = ak.full_like(params.airr["locus"], "None").tolist()
+
+        idx_array = np.array(idx)
+        obs_array = np.array(params.adata.obs_names)
+
+        obs_sort_idx = np.argsort(obs_array)
+        sorted_obs = obs_array[obs_sort_idx]
+
+        match_indices = np.searchsorted(sorted_obs, idx_array)
+        valid_matches = sorted_obs[match_indices] == idx_array
+
+        obs_indices = obs_sort_idx[match_indices[valid_matches]]
+        cell_clone_indices = np.nonzero(valid_matches)[0]
+
+        clone_chain_indices_array = np.asarray(clone_chain_indices, dtype=int)
+        values_array = np.asarray(values, dtype=int)
+
+        for obs_id, cell_clone_id in zip(obs_indices, cell_clone_indices, strict=True):
+            clone_ids[obs_id][clone_chain_indices_array[cell_clone_id] - 1] = values_array[cell_clone_id]
+
+        clonotype_cluster_series = ak.Array(
+            [[None if item == "None" else item for item in sublist] for sublist in clone_ids]
+        )
+        # unpack clonotype cluster cell indices and clone umis for graph partitions (clonotype clusters)
+        idx, values, umi_counts = zip(
+            *itertools.chain.from_iterable(
+                zip(
+                    ctn.cell_indices[str(ct_id)],
+                    itertools.repeat(str(clonotype_cluster)),
+                    ctn.clone_chain_data["umi_count"][str(ct_id)],
+                )
+                for ct_id, clonotype_cluster in enumerate(part.membership)
+            ),
+            strict=False,
+        )
+        # in size use the umi counts for clonotype clusters and sum across clonotypes
+        df1 = pd.DataFrame({"clone_id": values, "umi_counts": umi_counts}, index=idx)
+        df1["clone_id"] = df1["clone_id"].astype("int32")
+        df1["umi_counts"] = df1["umi_counts"].astype(float)
+        clonotype_cluster_size_series = (
+            df1.pivot_table(index=df1.index, columns="clone_id", values="umi_counts", fill_value=0, aggfunc="sum")
+            .reindex(params.adata.obs_names)
+            .fillna(0)
+            .to_numpy()
+        )  # may want sparse in the future
+        # keep the clone chain indices and umi counts-> may remove in the future
+        clonotype_distance_res["clone_chain_indices"] = json.dumps(ctn.clone_chain_data["chain_index"])
+        clonotype_distance_res["clone_umi_count"] = json.dumps(ctn.clone_chain_data["umi_count"])
+
+    # Return or store results
+
     if inplace:
-        params.set_obs(key_added, clonotype_cluster_series)
-        params.set_obs(key_added + "_size", clonotype_cluster_size_series)
+        if params.model == SCIRPY_DUAL_IR_MODEL:
+            params.set_obs(key_added, clonotype_cluster_series)
+            params.set_obs(key_added + "_size", clonotype_cluster_size_series)
+        else:
+            params.adata.obsm[key_added] = clonotype_cluster_series
+            params.adata.obsm[f"{key_added}_size"] = clonotype_cluster_size_series
         params.adata.uns[key_added] = clonotype_distance_res
     else:
         return (
