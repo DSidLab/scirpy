@@ -181,7 +181,6 @@ def _validate_parameters(
             distance_key = f"ir_dist_{sequence}_{_get_metric_key(metric)}"
     if distance_key not in params.adata.uns:
         raise ValueError("Sequence distances were not found in `adata.uns`. Did you run `pp.ir_dist`?")
-
     if key_added is None:
         if reference is not None:
             key_added = f"ir_query_{_get_db_name()}_{sequence}_{_get_metric_key(metric)}"
