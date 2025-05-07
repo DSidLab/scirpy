@@ -78,16 +78,15 @@ class ClonotypeNeighbors:
         chains = [f"{arm}_{chain}" for arm, chain in itertools.product(self._receptor_arm_cols, self._dual_ir_cols)]
         # append match_columns to airr_variables if scirpy multi chain model
         if params.model != SCIRPY_DUAL_IR_MODEL:
-            airr_variables += self.match_columns
+            if self.match_columns is not None:
+                airr_variables += self.match_columns
             airr_variables.append("umi_count")
             if self._dual_ir_cols == ["1", "2"]:
                 chains = [f"{arm}_{cid}" for arm in self._receptor_arm_cols for cid in params.chain_ids[arm]]
-        #
+
         obs = get_airr(params, airr_variables, chains)
-        #
         # remove entries without receptor (e.g. only non-productive chains) or no sequences
         obs = obs.loc[_has_ir(params) & np.any(~pd.isnull(obs), axis=1), :]
-        #
         if params.model == SCIRPY_DUAL_IR_MODEL and self.match_columns is not None:
             obs = obs.join(
                 params.get_obs(self.match_columns),
@@ -112,7 +111,7 @@ class ClonotypeNeighbors:
                     df = obs.loc[:, cols_exist]
                     df.columns = [col.replace(f"VJ_{i}", "VJ_1").replace(f"VDJ_{i}", "VDJ_1") for col in cols_exist]
                     df = df.dropna(how="all")
-                    df["chain_idx"] = str(i)
+                    df["chain_index"] = str(i)
                     dfs.append(df)
                 obs = pd.concat(dfs, axis=0)
 
@@ -164,7 +163,8 @@ class ClonotypeNeighbors:
             obs[col] = obs[col].astype(str)  # type: ignore
 
         # don't include chain index or umi count in grouping
-        cols = [col for col in obs.columns.tolist() if col not in ("chain_idx", "umi_count")]
+        cols = [col for col in obs.columns.tolist() if col not in ("chain_index", "umi_count")]
+
         # using groupby instead of drop_duplicates since we need the group indices below
         clonotype_groupby = obs.groupby(cols, sort=False, observed=True)
         # This only gets the unique_values (the groupby index)
@@ -175,6 +175,7 @@ class ClonotypeNeighbors:
                 "Error computing clonotypes. "
                 "No cells with IR information found (adata.obsm['chain_indices'] is None for all cells)"
             )
+
         # groupby.indices gets us a (index -> array of row indices) mapping.
         # It doesn't necessarily have the same order as `clonotypes`.
         # This needs to be a dict of arrays, otherwiswe anndata
@@ -183,47 +184,22 @@ class ClonotypeNeighbors:
         # implicitly.
         cell_indices = {
             str(i): obs.index[
-                clonotype_groupby.indices.get(
-                    # indices is not a tuple if it's just a single column.
-                    ct_tuple[0] if len(ct_tuple) == 1 else ct_tuple,
-                    [],
-                )
+                # indices is not a tuple if it's just a single column.
+                clonotype_groupby.indices.get(ct_tuple[0] if len(ct_tuple) == 1 else ct_tuple, [])
             ].values.tolist()
             for i, ct_tuple in enumerate(clonotypes.itertuples(index=False, name=None))
         }
         #
-        clone_chain_data = {"chain_index": None, "umi_count": None}
-        #
-        if "chain_idx" in obs.columns.tolist():
-            chain_indices = {
-                str(i): obs["chain_idx"]
-                .iloc[
-                    clonotype_groupby.indices.get(
-                        # indices is not a tuple if it's just a single column.
-                        ct_tuple[0] if len(ct_tuple) == 1 else ct_tuple,
-                        [],
-                    )
-                ]
+        clone_chain_data = {
+            k: {
+                str(i): obs[k]
+                .iloc[clonotype_groupby.indices.get(ct_tuple[0] if len(ct_tuple) == 1 else ct_tuple, [])]
                 .values.tolist()
                 for i, ct_tuple in enumerate(clonotypes.itertuples(index=False, name=None))
             }
-            clone_chain_data["chain_index"] = chain_indices
-        #
-        if "umi_count" in obs.columns.tolist():
-            umi_count = {
-                str(i): obs["umi_count"]
-                .iloc[
-                    clonotype_groupby.indices.get(
-                        # indices is not a tuple if it's just a single column.
-                        ct_tuple[0] if len(ct_tuple) == 1 else ct_tuple,
-                        [],
-                    )
-                ]
-                .values.tolist()
-                for i, ct_tuple in enumerate(clonotypes.itertuples(index=False, name=None))
-            }
-            clone_chain_data["umi_count"] = umi_count
-
+            for k in ("chain_index", "umi_count")
+            if k in obs.columns
+        }
         # make 'within group' a single column of tuples (-> only one distance
         # matrix instead of one per column.)
         if self.match_columns is not None:

@@ -348,52 +348,42 @@ def define_clonotype_clusters(
         clonotype_cluster_size_series = clonotype_cluster_series.groupby(clonotype_cluster_series).transform("count")
     else:
         # unpack clonotype cluster cell indices and clone umis for graph partitions (clonotype clusters)
-        idx, values, clone_chain_indices = zip(
+        idx, values, clone_chain_indices, umi_counts = zip(
             *itertools.chain.from_iterable(
                 zip(
                     ctn.cell_indices[str(ct_id)],
                     itertools.repeat(str(clonotype_cluster)),
                     ctn.clone_chain_data["chain_index"][str(ct_id)],
+                    ctn.clone_chain_data["umi_count"][str(ct_id)],
                 )
                 for ct_id, clonotype_cluster in enumerate(part.membership)
             ),
             strict=False,
         )
         # in series add an awkward array for clone ids for each chain
-        clone_ids = ak.full_like(params.airr["locus"], "None").tolist()
-
-        idx_array = np.array(idx)
-        obs_array = np.array(params.adata.obs_names)
-
-        obs_sort_idx = np.argsort(obs_array)
-        sorted_obs = obs_array[obs_sort_idx]
-
-        match_indices = np.searchsorted(sorted_obs, idx_array)
-        valid_matches = sorted_obs[match_indices] == idx_array
-
-        obs_indices = obs_sort_idx[match_indices[valid_matches]]
-        cell_clone_indices = np.nonzero(valid_matches)[0]
-
-        clone_chain_indices_array = np.asarray(clone_chain_indices, dtype=int)
-        values_array = np.asarray(values, dtype=int)
-
-        for obs_id, cell_clone_id in zip(obs_indices, cell_clone_indices, strict=True):
-            clone_ids[obs_id][clone_chain_indices_array[cell_clone_id] - 1] = values_array[cell_clone_id]
-
-        clonotype_cluster_series = ak.Array(
-            [[None if item == "None" else item for item in sublist] for sublist in clone_ids]
-        )
-        # unpack clonotype cluster cell indices and clone umis for graph partitions (clonotype clusters)
-        idx, values, umi_counts = zip(
-            *itertools.chain.from_iterable(
-                zip(
-                    ctn.cell_indices[str(ct_id)],
-                    itertools.repeat(str(clonotype_cluster)),
-                    ctn.clone_chain_data["umi_count"][str(ct_id)],
-                )
-                for ct_id, clonotype_cluster in enumerate(part.membership)
-            ),
-            strict=False,
+        target_size = ak.max(ak.num(params.airr["umi_count"]))
+        clone_ids = ak.fill_none(
+            ak.pad_none(ak.full_like(params.airr["umi_count"], -2), target_size, axis=1),
+            -1,
+        ).to_numpy()
+        #
+        #
+        obs_name_to_idx = {obs: i for i, obs in enumerate(params.adata.obs_names)}
+        idx_to_obs_index = np.array([obs_name_to_idx.get(ind, -1) for ind in idx])
+        valid_idx = np.where(idx_to_obs_index != -1)[0]
+        #
+        obs_inds = idx_to_obs_index[valid_idx]
+        valid_clone_chain_indices = np.asarray(clone_chain_indices, dtype=np.int64)[valid_idx] - 1
+        valid_clone_ids = np.asarray(values, dtype=np.int64)[valid_idx]
+        chain_indices = params.chain_indices[ctn.receptor_arms]
+        clone_ids = np.array(clone_ids)
+        #
+        for obs, chain, vals in zip(obs_inds, valid_clone_chain_indices, valid_clone_ids, strict=True):
+            clone_ids[obs, chain_indices[obs][chain]] = vals
+        #
+        clone_ids = ak.from_numpy(np.where(clone_ids == -2, None, clone_ids).astype(float))
+        clonotype_cluster_series = ak.enforce_type(
+            ak.nan_to_none(ak.drop_none(ak.mask(clone_ids, clone_ids != -1))), "var * ?int64"
         )
         # in size use the umi counts for clonotype clusters and sum across clonotypes
         df1 = pd.DataFrame({"clone_id": values, "umi_counts": umi_counts}, index=idx)
