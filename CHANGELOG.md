@@ -8,6 +8,27 @@ and this project adheres to [Semantic Versioning][].
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
+## [Unreleased]
+
+### Fixes
+
+- Ensure that clonotype network plots don't have any axis ticks ([#607](https://github.com/scverse/scirpy/pull/607)).
+
+### Chore
+
+- Update template to v0.5.0 ([#608](https://github.com/scverse/scirpy/pull/608/), [#606](https://github.com/scverse/scirpy/pull/606/))
+
+## v0.22.0
+
+### Fixes
+
+- Fix missing kwargs in `pl.repertoire_overlap` ([#599](https://github.com/scverse/scirpy/pull/599)).
+
+### Additions
+
+- Add `tl.mutational_load` to compute absolute and relative mutational load on IMGT-aligned sequences.
+  This is useful for assessin somatic hypermutation in B cells ([#573](https://github.com/scverse/scirpy/pull/573)).
+
 ## v0.21.0
 
 ### Additions
